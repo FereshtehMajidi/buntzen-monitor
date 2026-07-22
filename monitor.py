@@ -97,7 +97,7 @@ def notify(name, target_date, booking_page):
 
 
 def main():
-    target_date = datetime.now().date() + timedelta(days=1)
+    target_date = datetime.now().date() + timedelta(days=0)
 
     print("Checking Buntzen passes for", target_date)
 
