@@ -172,30 +172,6 @@ def check_pass(
             f"checked={checked_time} | "
             f"error={error}"
         )
-#print
-def send_summary(target_date, checked_time, results):
-    if not NTFY_TOPIC:
-        return
-
-    message = (
-        f"Checked: {checked_time}\n"
-        f"Target date: {target_date}\n\n"
-        + "\n".join(results)
-    )
-
-    try:
-        requests.post(
-            f"https://ntfy.sh/{NTFY_TOPIC}",
-            data=message.encode("utf-8"),
-            headers={
-                "Title": "Buntzen Monitor Check",
-                "Priority": "default",
-                "Tags": "parking",
-            },
-            timeout=20,
-        )
-    except Exception as e:
-        print(f"Could not send summary: {e}")
 
 # --------------------------------------------------
 # Main
@@ -206,7 +182,7 @@ def main() -> None:
 
     # Always check tomorrow according to Vancouver's local date,
     # not the GitHub server's UTC date.
-    target_date = (now_vancouver + timedelta(days=1)).date().isoformat()
+    target_date = (now_vancouver + timedelta(days=0)).date().isoformat()
 
     checked_time = now_vancouver.strftime(
         "%Y-%m-%d %I:%M:%S %p %Z"
