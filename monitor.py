@@ -1,11 +1,18 @@
 import os
-import requests
 from datetime import datetime, timedelta
-from urllib.parse import urlencode
+from zoneinfo import ZoneInfo
+
+import requests
 
 
-API_ROOT = "https://api.yodelpass.com"
-NTFY_TOPIC = os.environ["NTFY_TOPIC"]
+# --------------------------------------------------
+# Settings
+# --------------------------------------------------
+
+API_BASE_URL = "https://api.yodelpass.com/api"
+VANCOUVER_TZ = ZoneInfo("America/Vancouver")
+
+NTFY_TOPIC = os.environ.get("NTFY_TOPIC", "").strip()
 
 PASSES = {
     "Morning Pass": {
@@ -25,95 +32,179 @@ PASSES = {
     },
 }
 
-HEADERS = {
-    "User-Agent": "Mozilla/5.0",
-    "Accept": "application/json, text/plain, */*",
-    "Origin": "https://yodelportal.com",
-    "x-api-version": "5.6",
-}
+
+# --------------------------------------------------
+# Notification
+# --------------------------------------------------
+
+def send_notification(
+    pass_name: str,
+    status: str,
+    target_date: str,
+    booking_page: str,
+) -> None:
+    """Send an ntfy notification when a pass may be available."""
+
+    if not NTFY_TOPIC:
+        print("Warning: NTFY_TOPIC secret is missing. Notification not sent.")
+        return
+
+    message = (
+        f"{pass_name} may be available for {target_date}.\n"
+        f"Status: {status}\n"
+        f"Book immediately before it disappears."
+    )
+
+    try:
+        response = requests.post(
+            f"https://ntfy.sh/{NTFY_TOPIC}",
+            data=message.encode("utf-8"),
+            headers={
+                "Title": f"Buntzen pass available: {pass_name}",
+                "Priority": "urgent",
+                "Tags": "rotating_light,parking",
+                "Click": booking_page,
+            },
+            timeout=20,
+        )
+        response.raise_for_status()
+        print(f"Notification sent for {pass_name}.")
+
+    except requests.RequestException as error:
+        print(f"Could not send notification for {pass_name}: {error}")
 
 
-def check_pass(name, info, target_date):
+# --------------------------------------------------
+# Availability check
+# --------------------------------------------------
+
+def check_pass(
+    pass_name: str,
+    pass_info: dict,
+    target_date: str,
+    checked_time: str,
+) -> None:
+    """Check one Buntzen parking-pass type."""
+
+    catalog_item_id = pass_info["catalog_item_id"]
+    place_id = pass_info["place_id"]
+
+    url = f"{API_BASE_URL}/catalog-items/{catalog_item_id}"
+
     params = {
         "licensePlate": "",
         "licensePlateState": "",
         "extendPassDuration": 0,
-        "placeId": info["place_id"],
+        "placeId": place_id,
         "quantity": 1,
-        "ltc": target_date.isoformat(),
+        "ltc": target_date,
         "channel": 0,
     }
 
-    url = (
-        f"{API_ROOT}/api/catalog-items/"
-        f"{info['catalog_item_id']}?{urlencode(params)}"
+    headers = {
+        "x-api-version": "5.6",
+        "Accept": "application/json",
+        "User-Agent": "Buntzen-Pass-Monitor/1.0",
+    }
+
+    try:
+        response = requests.get(
+            url,
+            params=params,
+            headers=headers,
+            timeout=30,
+        )
+        response.raise_for_status()
+        data = response.json()
+
+        capacity_summary = data.get("capacitySummary") or {}
+
+        status = capacity_summary.get(
+            "displayCapacityStatus",
+            "Unknown",
+        )
+
+        capacity_status = capacity_summary.get("capacityStatus")
+        display_capacity = capacity_summary.get("displayCapacity")
+
+        print(
+            f"{pass_name}: {status} | "
+            f"capacityStatus={capacity_status} | "
+            f"capacity={display_capacity} | "
+            f"date={target_date} | "
+            f"checked={checked_time}"
+        )
+
+        normalized_status = str(status).strip().lower()
+
+        sold_out_statuses = {
+            "sold out",
+            "unavailable",
+            "not available",
+            "closed",
+        }
+
+        is_sold_out = (
+            normalized_status in sold_out_statuses
+            or capacity_status == 2
+        )
+
+        if not is_sold_out:
+            send_notification(
+                pass_name=pass_name,
+                status=status,
+                target_date=target_date,
+                booking_page=pass_info["booking_page"],
+            )
+
+    except requests.RequestException as error:
+        print(
+            f"{pass_name}: request failed | "
+            f"date={target_date} | "
+            f"checked={checked_time} | "
+            f"error={error}"
+        )
+
+    except ValueError as error:
+        print(
+            f"{pass_name}: invalid API response | "
+            f"date={target_date} | "
+            f"checked={checked_time} | "
+            f"error={error}"
+        )
+
+
+# --------------------------------------------------
+# Main
+# --------------------------------------------------
+
+def main() -> None:
+    now_vancouver = datetime.now(VANCOUVER_TZ)
+
+    # Always check tomorrow according to Vancouver's local date,
+    # not the GitHub server's UTC date.
+    target_date = (now_vancouver + timedelta(days=1)).date().isoformat()
+
+    checked_time = now_vancouver.strftime(
+        "%Y-%m-%d %I:%M:%S %p %Z"
     )
 
-    headers = HEADERS.copy()
-    headers["Referer"] = info["booking_page"]
+    print("=" * 65)
+    print(f"Buntzen pass check started: {checked_time}")
+    print(f"Target date: {target_date}")
+    print("=" * 65)
 
-    response = requests.get(url, headers=headers, timeout=30)
-    response.raise_for_status()
+    for pass_name, pass_info in PASSES.items():
+        check_pass(
+            pass_name=pass_name,
+            pass_info=pass_info,
+            target_date=target_date,
+            checked_time=checked_time,
+        )
 
-    data = response.json()
-    capacity = data.get("capacitySummary") or {}
-
-    status_code = capacity.get("capacityStatus")
-    status_text = capacity.get("displayCapacityStatus")
-
-    sold_out = (
-        status_code == 2
-        or "sold out" in str(status_text or "").lower()
-    )
-
-    print(
-        f"{name}: {status_text} "
-        f"(status={status_code})"
-    )
-
-    return not sold_out
-
-
-def notify(name, target_date, booking_page):
-    message = (
-        f"{name} may be AVAILABLE for {target_date}.\n\n"
-        "Open this notification and book immediately."
-    )
-
-    response = requests.post(
-        f"https://ntfy.sh/{NTFY_TOPIC}",
-        data=message.encode("utf-8"),
-        headers={
-            "Title": "Buntzen pass available!",
-            "Priority": "urgent",
-            "Tags": "rotating_light,car",
-            "Click": booking_page,
-        },
-        timeout=20,
-    )
-
-    response.raise_for_status()
-    print("Notification sent for", name)
-
-
-def main():
-    target_date = datetime.now().date() + timedelta(days=0)
-
-    print("Checking Buntzen passes for", target_date)
-
-    for name, info in PASSES.items():
-        try:
-            available = check_pass(name, info, target_date)
-
-            if available:
-                notify(
-                    name,
-                    target_date,
-                    info["booking_page"],
-                )
-
-        except Exception as error:
-            print(f"{name} check failed: {error}")
+    print("=" * 65)
+    print("Buntzen pass check finished.")
+    print("=" * 65)
 
 
 if __name__ == "__main__":
